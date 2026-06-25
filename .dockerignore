@@ -1,0 +1,11 @@
+# Keep the build context small & avoid copying stale build outputs into the image.
+# (The image rebuilds from source via the Gradle wrapper.)
+.git
+.gradle
+build/
+app/build/
+**/build/
+.idea/
+*.iml
+*.log
+log_data/
