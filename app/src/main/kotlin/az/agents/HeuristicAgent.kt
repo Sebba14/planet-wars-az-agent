@@ -30,51 +30,11 @@ class HeuristicAgent(
 
     override fun getAgentType(): String = "AZ-Heuristic"
 
-    override fun getAction(gameState: GameState): Action {
-        val me = player
-        val idle = gameState.planets.filter {
-            it.owner == me && it.transporter == null && it.nShips > minSourceShips
-        }
-        if (idle.isEmpty()) return Action.doNothing()
-
-        var bestSource: Planet? = null
-        var bestTarget: Planet? = null
-        var bestShips = 0.0
-        var bestScore = Double.NEGATIVE_INFINITY
-
-        for (source in idle) {
-            // Defend first: reserve the net enemy ships already inbound to this planet.
-            val threat = Heuristics.enemyIncoming(gameState, me, source.id)
-            val friendlyIn = Heuristics.myIncoming(gameState, me, source.id)
-            val reserve = (threat - friendlyIn).coerceAtLeast(0.0)
-            val available = source.nShips - reserve
-            if (available <= 1.0) continue
-
-            for (target in gameState.planets) {
-                if (target.owner == me) continue
-                val arr = Heuristics.travelTicks(source, target, params)
-                val defenders = Heuristics.defendersAtArrival(target, arr)
-                val alreadyComing = Heuristics.myIncoming(gameState, me, target.id)
-                val need = defenders + captureBuffer - alreadyComing
-                if (need <= 0.0) continue        // already covered by an inbound fleet
-                if (need > available) continue   // can't capture from this source now
-
-                val deny = if (target.owner == Player.Neutral) 1.0 else enemyDenyWeight
-                val value = growthWeight * target.growthRate * deny
-                val score = value - need - distanceWeight * arr
-                if (score > bestScore) {
-                    bestScore = score
-                    bestSource = source
-                    bestTarget = target
-                    bestShips = need
-                }
-            }
-        }
-
-        val src = bestSource ?: return Action.doNothing()
-        val tgt = bestTarget ?: return Action.doNothing()
-        val ships = minOf(bestShips, src.nShips)
-        if (ships < 1.0) return Action.doNothing()
-        return Action(me, src.id, tgt.id, ships)
-    }
+    override fun getAction(gameState: GameState): Action =
+        Heuristics.greedyAction(
+            gameState, player, params,
+            captureBuffer = captureBuffer, growthWeight = growthWeight,
+            enemyDenyWeight = enemyDenyWeight, distanceWeight = distanceWeight,
+            minSourceShips = minSourceShips,
+        )
 }

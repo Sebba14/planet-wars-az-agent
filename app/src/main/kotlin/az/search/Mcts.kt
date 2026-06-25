@@ -33,11 +33,24 @@ class Mcts(
     private val rolloutTicks: Int = 80,
     private val maxCandidates: Int = 20,
     private val net: OnnxNet? = null,
+    // Hybrid leaf: when a net is present, use it for PRIORS (move ordering) but keep the strong
+    // heuristic rollout for the leaf VALUE (useNetValue=false). This makes net-guided MCTS a
+    // strict upgrade over uniform-prior rollout-MCTS, so it can clear the promotion gate and start
+    // the self-play bootstrapping flywheel. Set useNetValue=true once the value head is trusted.
+    private val useNetValue: Boolean = false,
+    // Tunable leaf-evaluation weights (default = original eval; non-default presets via MctsAgent).
+    private val evalWeights: Heuristics.EvalWeights = Heuristics.EvalWeights.DEFAULT,
+    // First-play-urgency: NaN = disabled (current forced unvisited-first sweep). When set, unvisited
+    // children are valued at parentQ - fpuReduction and selected by PUCT, so the search isn't forced to
+    // burn a sim on every one of [maxCandidates] children before it can deepen the promising lines.
+    private val fpuReduction: Double = Double.NaN,
+    private val ensureGreedy: Boolean = false,
 ) {
     private val opp = me.opponent()
     private val rollMe = HeuristicAgent().also { it.prepareToPlayAs(me, params) }
     private val rollOpp = HeuristicAgent().also { it.prepareToPlayAs(opp, params) }
     private val useNet = net != null
+    private val useFpu = !fpuReduction.isNaN()
 
     class Result(val best: Action, val policy: List<Pair<Action, Double>>, val rootValue: Double, val sims: Int)
 
@@ -48,7 +61,7 @@ class Mcts(
 
     private inner class Node(val state: GameState) {
         val actions: List<Action> =
-            if (isTerminal(state)) emptyList() else ActionGen.candidates(state, me, params, maxCandidates)
+            if (isTerminal(state)) emptyList() else ActionGen.candidates(state, me, params, maxCandidates, ensureGreedy)
         val n = IntArray(actions.size)
         val w = DoubleArray(actions.size)
         val children = arrayOfNulls<Node>(actions.size)
@@ -59,7 +72,7 @@ class Mcts(
         init {
             if (actions.isEmpty()) {
                 priors = DoubleArray(0)
-                netValue = if (useNet) Heuristics.normalizedValue(Heuristics.evaluate(state, me, params)) else 0.0
+                netValue = if (useNet) Heuristics.evaluateNormalized(state, me, params, evalWeights) else 0.0
             } else if (useNet) {
                 val out = net!!.infer(state, me, params)
                 netValue = out.value.toDouble()
@@ -89,7 +102,7 @@ class Mcts(
     }
 
     private fun rolloutValue(state: GameState): Double {
-        if (isTerminal(state)) return Heuristics.normalizedValue(Heuristics.evaluate(state, me, params))
+        if (isTerminal(state)) return Heuristics.evaluateNormalized(state, me, params, evalWeights)
         val sim = state.deepCopy()
         val fm = ForwardModel(sim, params)
         var t = 0
@@ -97,23 +110,38 @@ class Mcts(
             fm.step(mapOf(me to rollMe.getAction(fm.state), opp to rollOpp.getAction(fm.state)))
             t++
         }
-        return Heuristics.normalizedValue(Heuristics.evaluate(fm.state, me, params))
+        return Heuristics.evaluateNormalized(fm.state, me, params, evalWeights)
     }
 
-    private fun leafValue(node: Node): Double = if (useNet) node.netValue else rolloutValue(node.state)
+    private fun leafValue(node: Node): Double = if (useNet && useNetValue) node.netValue else rolloutValue(node.state)
 
     private fun simulate(node: Node, depth: Int): Double {
         if (node.actions.isEmpty()) return leafValue(node)
         if (depth >= maxDepth) return leafValue(node)
 
-        var idx = node.actions.indices.firstOrNull { node.n[it] == 0 } ?: -1
-        if (idx < 0) {
+        var idx: Int
+        if (useFpu) {
+            // PUCT over ALL children; unvisited ones get an optimistic-ish parentQ - fpuReduction prior
+            // value, so the search can deepen promising lines instead of force-sweeping every child once.
+            idx = -1
             var bestU = Double.NEGATIVE_INFINITY
             val sqrtN = sqrt(node.totalN.toDouble() + 1.0)
+            val parentQ = if (node.totalN > 0) node.w.sum() / node.totalN else 0.0
             for (i in node.actions.indices) {
-                val q = node.w[i] / node.n[i]
+                val q = if (node.n[i] == 0) parentQ - fpuReduction else node.w[i] / node.n[i]
                 val u = q + cPuct * node.priors[i] * sqrtN / (1.0 + node.n[i])
                 if (u > bestU) { bestU = u; idx = i }
+            }
+        } else {
+            idx = node.actions.indices.firstOrNull { node.n[it] == 0 } ?: -1
+            if (idx < 0) {
+                var bestU = Double.NEGATIVE_INFINITY
+                val sqrtN = sqrt(node.totalN.toDouble() + 1.0)
+                for (i in node.actions.indices) {
+                    val q = node.w[i] / node.n[i]
+                    val u = q + cPuct * node.priors[i] * sqrtN / (1.0 + node.n[i])
+                    if (u > bestU) { bestU = u; idx = i }
+                }
             }
         }
 

@@ -20,7 +20,7 @@ import games.planetwars.core.Player
 object ActionGen {
     private data class Scored(val action: Action, val score: Double)
 
-    fun candidates(state: GameState, me: Player, params: GameParams, maxCandidates: Int = 24): List<Action> {
+    fun candidates(state: GameState, me: Player, params: GameParams, maxCandidates: Int = 24, ensureGreedy: Boolean = false): List<Action> {
         val idle = state.planets.filter { it.owner == me && it.transporter == null && it.nShips > 2.0 }
         if (idle.isEmpty()) return listOf(Action.DO_NOTHING)
 
@@ -73,11 +73,14 @@ object ActionGen {
             }
         }
 
-        val top = scored.sortedByDescending { it.score }
-            .map { it.action }
-            .distinct()
-            .take(maxCandidates)
-            .toMutableList()
+        val ordered = scored.sortedByDescending { it.score }.map { it.action }.distinct().toMutableList()
+        // Guarantee the greedy/rollout-policy move is in the set (and prioritized so the cap can't drop
+        // it) — otherwise the move driving the rollouts may be unplayable at the root.
+        if (ensureGreedy) {
+            val g = Heuristics.greedyAction(state, me, params)
+            if (g != Action.DO_NOTHING) { ordered.remove(g); ordered.add(0, g) }
+        }
+        val top = ordered.take(maxCandidates).toMutableList()
         top.add(Action.DO_NOTHING)
         return top
     }
